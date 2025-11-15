@@ -103,33 +103,36 @@ jobs:
             ls -la
             
             # 检查项目结构
-            if [ ! -d "bindings/node" ]; then
-              echo "Error: bindings/node directory not found"
+            if [ ! -d "packages/core" ]; then
+              echo "Error: packages/core directory not found"
               echo "Available directories:"
               find . -maxdepth 2 -type d | head -20
               exit 1
             fi
             
-            # 进入 bindings/node 目录
-            cd bindings/node
+            # 进入 packages/core 目录（这是 @swc/core 包）
+            cd packages/core
             echo "Current directory: $(pwd)"
-            echo "bindings/node contents:"
+            echo "packages/core contents:"
             ls -la
             
-            # 安装 Node.js 依赖
+            # 安装 Node.js 依赖（根目录和 packages/core）
             echo "Installing Node.js dependencies..."
-            if [ -f package-lock.json ]; then
-              npm ci
+            cd /workspace
+            if [ -f package-lock.json ] || [ -f yarn.lock ]; then
+              if [ -f yarn.lock ]; then
+                npm install -g yarn
+                yarn install || npm install
+              else
+                npm ci || npm install
+              fi
             else
               npm install
             fi
             
-            # 检查 package.json 中的构建脚本
-            echo "Package.json build scripts:"
-            cat package.json | grep -A 10 '"scripts"' || echo "No scripts found"
-            
-            # 尝试构建
-            echo "Building SWC Node.js bindings for RISC-V..."
+            # 进入 packages/core 并安装依赖
+            cd packages/core
+            npm install || true
             
             # 设置环境变量
             export CARGO_BUILD_JOBS=$(nproc || echo 4)
@@ -137,64 +140,79 @@ jobs:
             export CARGO_NET_RETRY=10
             export CARGO_HTTP_TIMEOUT=300
             
-            # 尝试不同的构建方式
-            if npm run build 2>&1; then
-              echo "✓ Build successful with 'npm run build'"
-            elif npm run build:release 2>&1; then
-              echo "✓ Build successful with 'npm run build:release'"
-            elif npm run build:napi 2>&1; then
-              echo "✓ Build successful with 'npm run build:napi'"
-            else
-              echo "⚠ Standard build scripts failed, trying manual build..."
+            # 构建 SWC Node.js bindings for RISC-V
+            echo "Building SWC Node.js bindings for RISC-V..."
+            echo "Using napi build command with RISC-V target..."
+            
+            # 使用 napi build 命令，指定 RISC-V 目标
+            # 注意：napi build 需要指定 target，但可能需要先编译 TypeScript
+            npm run build:ts || tsc -d || echo "TypeScript build skipped"
+            
+            # 使用 napi build 构建 RISC-V 目标
+            # napi build 会自动检测目标平台，但我们需要明确指定
+            npx napi build \
+              --manifest-path ../../Cargo.toml \
+              --target riscv64-unknown-linux-gnu \
+              --platform \
+              -p binding_core_node \
+              --js ./binding.js \
+              --dts ./binding.d.ts \
+              --release \
+              -o . || {
+              echo "⚠ napi build failed, trying alternative method..."
               
-              # 手动构建：先编译 Rust 部分，再构建 Node.js 绑定
+              # 备用方法：先编译 Rust，然后手动构建
               cd /workspace
-              
-              # 编译所有 Rust crates
-              echo "Building Rust crates..."
-              cargo build --release --target riscv64gc-unknown-linux-gnu || {
+              echo "Building Rust crates for RISC-V..."
+              cargo build --release --target riscv64gc-unknown-linux-gnu -p binding_core_node || {
                 echo "Error: Failed to build Rust crates"
                 exit 1
               }
               
-              # 回到 bindings/node 并尝试构建 Node.js 绑定
-              cd bindings/node
+              # 回到 packages/core
+              cd packages/core
               
-              # 检查是否有 napi-rs 相关的构建脚本
-              if [ -f "build.rs" ] || [ -f "Cargo.toml" ]; then
-                echo "Found Rust build files, building with cargo..."
-                cargo build --release --target riscv64gc-unknown-linux-gnu || {
-                  echo "Error: Failed to build Node.js bindings"
-                  exit 1
-                }
-              fi
-              
-              # 尝试使用 napi-cli 构建
-              if command -v napi >/dev/null 2>&1 || npm list -g napi-cli >/dev/null 2>&1; then
-                echo "Using napi-cli to build..."
-                npx napi build --platform --target riscv64-unknown-linux-gnu || {
-                  echo "Warning: napi-cli build failed"
-                }
-              fi
-            fi
+              # 尝试使用 napi-cli 从已编译的二进制文件生成绑定
+              npx napi build \
+                --manifest-path ../../Cargo.toml \
+                --target riscv64-unknown-linux-gnu \
+                -p binding_core_node \
+                --js ./binding.js \
+                --dts ./binding.d.ts \
+                --release \
+                -o . || {
+                echo "Error: All build methods failed"
+                exit 1
+              }
+            }
             
             # 查找生成的二进制文件
             echo "Searching for built binaries..."
             find /workspace -name "*.node" -type f 2>/dev/null | head -10
             find /workspace/target -name "*.node" -type f 2>/dev/null | head -10
-            find bindings/node -name "*.node" -type f 2>/dev/null | head -10
+            find . -name "*.node" -type f 2>/dev/null | head -10
             
             # 查找 binding.node 文件
             BINDING_NODE=""
-            if [ -f "binding.node" ]; then
-              BINDING_NODE="binding.node"
-            elif [ -f "binding-linux-riscv64.node" ]; then
-              BINDING_NODE="binding-linux-riscv64.node"
-            elif [ -f "../target/riscv64gc-unknown-linux-gnu/release/binding.node" ]; then
-              BINDING_NODE="../target/riscv64gc-unknown-linux-gnu/release/binding.node"
+            if [ -f "swc.linux-riscv64-gnu.node" ]; then
+              BINDING_NODE="swc.linux-riscv64-gnu.node"
+            elif [ -f "swc.linux-riscv64-musl.node" ]; then
+              BINDING_NODE="swc.linux-riscv64-musl.node"
+            elif [ -f "../../target/riscv64gc-unknown-linux-gnu/release/libbinding_core_node.so" ]; then
+              # 如果是 .so 文件，需要重命名为 .node
+              cp "../../target/riscv64gc-unknown-linux-gnu/release/libbinding_core_node.so" "swc.linux-riscv64-gnu.node"
+              BINDING_NODE="swc.linux-riscv64-gnu.node"
             else
               # 尝试查找任何 .node 文件
               BINDING_NODE=$(find . -name "*.node" -type f | head -1)
+              if [ -z "$BINDING_NODE" ]; then
+                # 尝试查找 target 目录中的 .so 文件
+                SO_FILE=$(find ../../target -name "libbinding_core_node.so" -type f | head -1)
+                if [ -n "$SO_FILE" ]; then
+                  cp "$SO_FILE" "swc.linux-riscv64-gnu.node"
+                  BINDING_NODE="swc.linux-riscv64-gnu.node"
+                fi
+              fi
             fi
             
             if [ -n "$BINDING_NODE" ] && [ -f "$BINDING_NODE" ]; then
@@ -208,6 +226,7 @@ jobs:
               echo "✗ Error: binding.node not found"
               echo "Searching in all locations:"
               find /workspace -name "*.node" -type f 2>/dev/null
+              find /workspace -name "*.so" -type f 2>/dev/null | grep -i binding
               exit 1
             fi
             
