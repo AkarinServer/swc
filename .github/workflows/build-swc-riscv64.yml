@@ -116,23 +116,29 @@ jobs:
             echo "packages/core contents:"
             ls -la
             
-            # 安装 Node.js 依赖（根目录和 packages/core）
+            # 安装 Node.js 依赖
+            # SWC 项目使用 Yarn workspace，需要启用 Corepack 来使用正确的 Yarn 版本
             echo "Installing Node.js dependencies..."
             cd /workspace
-            if [ -f package-lock.json ] || [ -f yarn.lock ]; then
-              if [ -f yarn.lock ]; then
-                npm install -g yarn
-                yarn install || npm install
-              else
-                npm ci || npm install
-              fi
-            else
-              npm install
-            fi
             
-            # 进入 packages/core 并安装依赖
-            cd packages/core
-            npm install || true
+            # 启用 Corepack（Node.js 内置的包管理器版本管理工具）
+            corepack enable || {
+              echo "Warning: corepack enable failed, trying alternative method"
+              npm install -g corepack
+              corepack enable
+            }
+            
+            # 使用 Yarn 安装依赖（Corepack 会自动使用 package.json 中指定的版本）
+            if [ -f yarn.lock ]; then
+              echo "Using Yarn to install dependencies..."
+              yarn install --frozen-lockfile || yarn install
+            elif [ -f package-lock.json ]; then
+              echo "Using npm to install dependencies..."
+              npm ci || npm install
+            else
+              echo "No lock file found, using Yarn..."
+              yarn install || npm install
+            fi
             
             # 设置环境变量
             export CARGO_BUILD_JOBS=$(nproc || echo 4)
@@ -140,13 +146,17 @@ jobs:
             export CARGO_NET_RETRY=10
             export CARGO_HTTP_TIMEOUT=300
             
+            # 进入 packages/core 目录进行构建
+            cd /workspace/packages/core
+            echo "Current directory: $(pwd)"
+            
             # 构建 SWC Node.js bindings for RISC-V
             echo "Building SWC Node.js bindings for RISC-V..."
             echo "Using napi build command with RISC-V target..."
             
             # 使用 napi build 命令，指定 RISC-V 目标
             # 注意：napi build 需要指定 target，但可能需要先编译 TypeScript
-            npm run build:ts || tsc -d || echo "TypeScript build skipped"
+            yarn build:ts || npm run build:ts || tsc -d || echo "TypeScript build skipped"
             
             # 使用 napi build 构建 RISC-V 目标
             # napi build 会自动检测目标平台，但我们需要明确指定
